@@ -97,7 +97,7 @@ void Error_Handler(void);
 #define SPI1_CS_Pin GPIO_PIN_3
 #define SPI1_CS_GPIO_Port GPIOB
 /* USER CODE BEGIN Private defines */
-
+#define SD_SPI_HANDLE hspi1
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

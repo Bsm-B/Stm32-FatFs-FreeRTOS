@@ -1,30 +1,33 @@
 /* USER CODE BEGIN Header */
 /**
-  ******************************************************************************
-  * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * <h2><center>&copy; Copyright (c) 2022 STMicroelectronics.
-  * All rights reserved.</center></h2>
-  *
-  * This software component is licensed by ST under BSD 3-Clause license,
-  * the "License"; You may not use this file except in compliance with the
-  * License. You may obtain a copy of the License at:
-  *                        opensource.org/licenses/BSD-3-Clause
-  *
-  ******************************************************************************
-  */
+ ******************************************************************************
+ * @file           : main.c
+ * @brief          : Main program body
+ ******************************************************************************
+ * @attention
+ *
+ * <h2><center>&copy; Copyright (c) 2022 STMicroelectronics.
+ * All rights reserved.</center></h2>
+ *
+ * This software component is licensed by ST under BSD 3-Clause license,
+ * the "License"; You may not use this file except in compliance with the
+ * License. You may obtain a copy of the License at:
+ *                        opensource.org/licenses/BSD-3-Clause
+ *
+ ******************************************************************************
+ */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
 #include "fatfs.h"
 
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
+#include <string.h>
+#include <stdarg.h> //for va_list var arg functions
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -54,6 +57,18 @@ UART_HandleTypeDef huart4;
 PCD_HandleTypeDef hpcd_USB_FS;
 
 osThreadId defaultTaskHandle;
+osThreadId Blink01Handle;
+osThreadId SDinfoHandle;
+osThreadId SDManagerHandle;
+osMutexId SDCardMutexHandle;
+
+static FATFS FatFs; 	//Fatfs handle
+static FRESULT fres; //Result after operations
+static FILINFO fno;
+DIR dir;
+DWORD free_clusters, free_sectors, total_sectors;
+FATFS* getFreeFs;
+
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -68,9 +83,13 @@ static void MX_USB_PCD_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART4_UART_Init(void);
 void StartDefaultTask(void const * argument);
+void StartTask02(void const * argument);
+void StartTask04(void const * argument);
+void StartTask05(void const * argument);
 
 /* USER CODE BEGIN PFP */
-
+void tree(char *);
+void myprintf(const char *, ...);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -117,20 +136,25 @@ int main(void)
 
   /* USER CODE END 2 */
 
+  /* Create the mutex(es) */
+  /* definition and creation of SDCardMutex */
+  osMutexDef(SDCardMutex);
+  SDCardMutexHandle = osMutexCreate(osMutex(SDCardMutex));
+
   /* USER CODE BEGIN RTOS_MUTEX */
-  /* add mutexes, ... */
+	/* add mutexes, ... */
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* add semaphores, ... */
+	/* add semaphores, ... */
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
-  /* start timers, add new ones, ... */
+	/* start timers, add new ones, ... */
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
+	/* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -138,8 +162,23 @@ int main(void)
   osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 128);
   defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
+  /* definition and creation of Blink01 */
+//  osThreadDef(Blink01, StartTask02, osPriorityNormal, 0, 128);
+//  Blink01Handle = osThreadCreate(osThread(Blink01), NULL);
+
+  /* definition and creation of SDinfo */
+  osThreadDef(SDinfo, StartTask04, osPriorityHigh, 0, 160);
+  SDinfoHandle = osThreadCreate(osThread(SDinfo), NULL);
+
+  /* definition and creation of SDManager */
+  osThreadDef(SDManager, StartTask05, osPriorityRealtime, 0, 128);
+  SDManagerHandle = osThreadCreate(osThread(SDManager), NULL);
+
   /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
+	/* add threads, ... */
+
+	/* USER CODE BEGIN RTOS_THREADS */
+	/* add threads, ... */
   /* USER CODE END RTOS_THREADS */
 
   /* Start scheduler */
@@ -148,12 +187,11 @@ int main(void)
   /* We should never get here as control is now taken by the scheduler */
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while (1)
-  {
+	while (1) {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-  }
+	}
   /* USER CODE END 3 */
 }
 
@@ -387,7 +425,7 @@ static void MX_USART4_UART_Init(void)
 
   /* USER CODE END USART4_Init 1 */
   huart4.Instance = USART4;
-  huart4.Init.BaudRate = 9600;
+  huart4.Init.BaudRate = 115200;
   huart4.Init.WordLength = UART_WORDLENGTH_8B;
   huart4.Init.StopBits = UART_STOPBITS_1;
   huart4.Init.Parity = UART_PARITY_NONE;
@@ -491,24 +529,223 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+void myprintf(const char *fmt, ...) {
+	static char buffer[256];
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(buffer, sizeof(buffer), fmt, args);
+	va_end(args);
+
+	int len = strlen(buffer);
+	HAL_UART_Transmit(&huart4, (uint8_t*) buffer, len, -1);
+
+}
+
+void tree(char *path) {
+
+	myprintf("Tree");
+	fres = f_opendir(&dir, path);
+
+	if (fres == FR_OK) {
+		while (1) {
+
+			fres = f_readdir(&dir, &fno);
+
+			if ((fres != FR_OK) || (fno.fname[0] == 0))
+				break;
+			myprintf( "\n %c%c%c%c%c %10d %u-%02u-%02u, %02u:%02u	%s/%s",
+					((fno.fattrib & AM_DIR) ? 'D' : '-'),
+										((fno.fattrib & AM_RDO) ? 'R' : '-'),
+										((fno.fattrib & AM_SYS) ? 'S' : '-'),
+										((fno.fattrib & AM_HID) ? 'H' : '-'),
+										((fno.fattrib & AM_ARC) ? 'A' : '-'),
+										((fno.fdate >> 9) + 1980), (fno.fdate >> 5 & 15),
+										(fno.fdate & 31), (fno.ftime >> 11), (fno.ftime >> 5 & 63),
+										(int) fno.fsize, path, fno.fname);
+			/*
+			sprintf(string, "\n %c%c%c%c%c %10d %u-%02u-%02u, %02u:%02u	%s/%s",
+					((fno.fattrib & AM_DIR) ? 'D' : '-'),
+					((fno.fattrib & AM_RDO) ? 'R' : '-'),
+					((fno.fattrib & AM_SYS) ? 'S' : '-'),
+					((fno.fattrib & AM_HID) ? 'H' : '-'),
+					((fno.fattrib & AM_ARC) ? 'A' : '-'),
+					((fno.fdate >> 9) + 1980), (fno.fdate >> 5 & 15),
+					(fno.fdate & 31), (fno.ftime >> 11), (fno.ftime >> 5 & 63),
+					(int) fno.fsize, path, fno.fname);
+			myprintf("%s", string);*/
+		}
+	}
+
+}
+
+void result_info(FRESULT fres) {
+
+	switch (fres) {
+	case FR_OK:
+		myprintf("Succeeded \n");
+		break;
+	case FR_DISK_ERR:
+		myprintf("A hard error occurred in the low level disk I/O layer \n");
+		break;
+	case FR_INT_ERR:
+		myprintf("Assertion failed \n");
+		break;
+	case FR_NOT_READY:
+		myprintf("The physical drive cannot work");
+		break;
+	case FR_NO_FILE:
+		myprintf("Could not find the file \n");
+		break;
+	case FR_NO_PATH:
+		myprintf("Could not find the path \n");
+		break;
+	case FR_INVALID_NAME:
+		myprintf("The path name format is invalid \n");
+		break;
+	case FR_DENIED:
+		myprintf("Access denied due to prohibited access or directory full \n");
+		break;
+	case FR_EXIST:
+		myprintf("Access denied due to prohibited access +\n");
+		break;
+	case FR_INVALID_OBJECT:
+		myprintf("The file/directory object is invalid \n");
+		break;
+	case FR_WRITE_PROTECTED:
+		myprintf("The physical drive is write protected \n");
+		break;
+
+	case FR_INVALID_DRIVE:
+		myprintf("The logical drive number is invalid \n");
+		break;
+	case FR_NOT_ENABLED:
+		myprintf("The volume has no work area");
+		break;
+
+	case FR_NO_FILESYSTEM:
+		myprintf("There is no valid FAT volume");
+		break;
+
+	case FR_MKFS_ABORTED:
+		myprintf("The f_mkfs() aborted due to any parameter error \n");
+		break;
+	case FR_TIMEOUT:
+		myprintf(
+				"Could not get a grant to access the volume within defined period \n");
+		break;
+	case FR_LOCKED:
+		myprintf(
+				"The operation is rejected according to the file sharing policy \n");
+		break;
+
+	case FR_NOT_ENOUGH_CORE:
+		myprintf("LFN working buffer could not be allocated \n");
+		break;
+
+	case FR_TOO_MANY_OPEN_FILES:
+		myprintf("Number of open files > _FS_SHARE \n");
+		break;
+
+	case FR_INVALID_PARAMETER:
+		myprintf("Given parameter is invalid \n");
+		break;
+
+	default:
+		myprintf("An error occured. (%d)\n", fres);
+	}
+
+}
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
 /**
-  * @brief  Function implementing the defaultTask thread.
-  * @param  argument: Not used
-  * @retval None
-  */
+ * @brief  Function implementing the defaultTask thread.
+ * @param  argument: Not used
+ * @retval None
+ */
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void const * argument)
 {
   /* USER CODE BEGIN 5 */
+	/* Infinite loop */
+	for (;;) {
+		myprintf("\n\r Default \n\r");
+		 HAL_GPIO_TogglePin(LD6_GPIO_Port, LD6_Pin);
+		osDelay(1000);
+	}
+  /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_StartTask02 */
+/**
+* @brief Function implementing the Blink01 thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask02 */
+void StartTask02(void const * argument)
+{
+  /* USER CODE BEGIN StartTask02 */
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+	  myprintf("\nTask02");
+	  HAL_GPIO_TogglePin(LD5_GPIO_Port, LD5_Pin);
+    osDelay(100);
   }
-  /* USER CODE END 5 */
+  /* USER CODE END StartTask02 */
+}
+
+/* USER CODE BEGIN Header_StartTask04 */
+/**
+* @brief Function implementing the SDinfo thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask04 */
+void StartTask04(void const * argument)
+{
+  /* USER CODE BEGIN StartTask04 */
+  /* Infinite loop */
+  for(;;)
+  {
+	  fres = f_mount(&FatFs, "", 1); //1=mount now
+	   if (fres != FR_OK) {
+	 	  result_info(fres);
+	   }else{
+		   fres = f_getfree("", &free_clusters, &getFreeFs);
+			   //Formula comes from ChaN's documentation
+			   total_sectors = (getFreeFs->n_fatent - 2) * getFreeFs->csize;
+			   free_sectors = free_clusters * getFreeFs->csize;
+			   //Let's get some statistics from the SD card
+			   myprintf("SD card stats:\r\n%10lu KiB total drive space.\r\n%10lu KiB available.\r\n", total_sectors / 2, free_sectors / 2);
+			   osDelay(100);
+			   tree("");
+	   }
+	   f_mount(NULL, "", 0);
+
+	   osDelay(5000);
+  }
+  /* USER CODE END StartTask04 */
+}
+
+/* USER CODE BEGIN Header_StartTask05 */
+/**
+* @brief Function implementing the SDManager thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask05 */
+void StartTask05(void const * argument)
+{
+  /* USER CODE BEGIN StartTask05 */
+  /* Infinite loop */
+  for(;;)
+  {
+   myprintf("\nTask05");
+    osDelay(800);
+  }
+  /* USER CODE END StartTask05 */
 }
 
 /**
@@ -518,11 +755,10 @@ void StartDefaultTask(void const * argument)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
-  while (1)
-  {
-  }
+	/* User can add his own implementation to report the HAL error return state */
+	__disable_irq();
+	while (1) {
+	}
   /* USER CODE END Error_Handler_Debug */
 }
 
